@@ -24,6 +24,7 @@
 #include <linux/rtc.h>
 #include <linux/wakelock.h>
 #include <linux/workqueue.h>
+#include <linux/wahoo_info.h>
 
 #define HTC_BATT_NAME "htc_battery"
 
@@ -36,10 +37,11 @@
  */
 DEFINE_MUTEX(htc_battery_lock);
 
-static int full_level_dis_chg = 100;
-module_param_named(
-	full_level_dis_chg, full_level_dis_chg, int, S_IRUSR | S_IWUSR
-);
+#define DEFAULT_CHARGE_STOP_LEVEL 100
+#define DEFAULT_CHARGE_START_LEVEL 0
+
+static int charge_stop_level = DEFAULT_CHARGE_STOP_LEVEL;
+static int charge_start_level = DEFAULT_CHARGE_START_LEVEL;
 
 #define BATT_LOG(x...) pr_info("[BATT] " x)
 
@@ -281,13 +283,17 @@ static int is_bounding_fully_charged_level(void)
 {
 	static int s_pingpong = 1;
 	int is_batt_chg_off_by_bounding = 0;
-	int upperbd = htc_batt_info.rep.full_level;
+	int upperbd = charge_stop_level;
+	int lowerbd = charge_start_level;
 	int current_level = htc_batt_info.rep.level;
-	/* Default 5% range */
-	int lowerbd = upperbd - 5;
 
-	if ((htc_batt_info.rep.full_level > 0) &&
-	    (htc_batt_info.rep.full_level < 100)) {
+	if ((upperbd == DEFAULT_CHARGE_STOP_LEVEL) &&
+	    (lowerbd == DEFAULT_CHARGE_START_LEVEL))
+		return 0;
+
+	if ((upperbd > lowerbd) &&
+	    (upperbd <= DEFAULT_CHARGE_STOP_LEVEL) &&
+	    (lowerbd >= DEFAULT_CHARGE_START_LEVEL)) {
 		if (lowerbd < 0)
 			lowerbd = 0;
 
@@ -579,7 +585,6 @@ static void batt_worker(struct work_struct *work)
 	if (((int)htc_batt_info.rep.charging_source >
 	    POWER_SUPPLY_TYPE_BATTERY) ||
 	    (chg_present && !ex_otg)) {
-		htc_batt_info.rep.full_level = full_level_dis_chg;
 		if (is_bounding_fully_charged_level())
 			g_pwrsrc_dis_reason |= HTC_BATT_PWRSRC_DIS_BIT_MFG;
 		else
@@ -772,6 +777,83 @@ static int htc_notifier_batt_callback(struct notifier_block *nb,
 	return NOTIFY_OK;
 }
 
+static int set_full_level_dis_chg(const char *val,
+				  const struct kernel_param *kp)
+{
+	int rc;
+	int old_val = charge_stop_level;
+
+	rc = param_set_int(val, kp);
+	if (rc) {
+		BATT_ERR("Unable to set charge_stop_level: %d\n", rc);
+		return rc;
+	}
+
+	if (charge_stop_level != old_val) {
+		charge_start_level = charge_stop_level - 5;
+		htc_batt_schedule_batt_info_update();
+	}
+
+	return 0;
+}
+
+static struct kernel_param_ops disable_charge_ops = {
+	.set = set_full_level_dis_chg,
+	.get = param_get_int,
+};
+module_param_cb(full_level_dis_chg, &disable_charge_ops,
+		&charge_stop_level, 0644);
+
+static int set_charge_stop_level(const char *val,
+				 const struct kernel_param *kp)
+{
+	int rc;
+	int old_val = charge_stop_level;
+
+	rc = param_set_int(val, kp);
+	if (rc) {
+		BATT_ERR("Unable to set charge_stop_level: %d\n", rc);
+		return rc;
+	}
+
+	if (charge_stop_level != old_val)
+		htc_batt_schedule_batt_info_update();
+
+	return 0;
+}
+
+static struct kernel_param_ops charge_stop_ops = {
+	.set = set_charge_stop_level,
+	.get = param_get_int,
+};
+module_param_cb(charge_stop_level, &charge_stop_ops,
+		&charge_stop_level, 0644);
+
+static int set_charge_start_level(const char *val,
+				  const struct kernel_param *kp)
+{
+	int rc;
+	int old_val = charge_start_level;
+
+	rc = param_set_int(val, kp);
+	if (rc) {
+		BATT_ERR("Unable to set charge_start_level: %d\n", rc);
+		return rc;
+	}
+
+	if (charge_start_level != old_val)
+		htc_batt_schedule_batt_info_update();
+
+	return 0;
+}
+
+static struct kernel_param_ops charge_start_ops = {
+	.set = set_charge_start_level,
+	.get = param_get_int,
+};
+module_param_cb(charge_start_level, &charge_start_ops,
+		&charge_start_level, 0644);
+
 #define WALLEYE_BATT_ID_1	"walleye 1"
 #define WALLEYE_BATT_ID_2	"walleye 2"
 #define MUSKIE_BATT_ID_1	"muskie 1"
@@ -939,6 +1021,14 @@ static int htc_battery_fb_register(void)
 static int htc_battery_probe(struct platform_device *pdev)
 {
 	int rc = 0;
+
+#ifndef MODULE
+	if (is_google_taimen()) {
+		BATT_ERR("%s: This is not the Pixel 2, bailing out...\n",
+			  __func__);
+		return -ENODEV;
+	}
+#endif
 
 	mutex_lock(&htc_battery_lock);
 

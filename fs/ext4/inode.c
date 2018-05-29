@@ -3299,29 +3299,29 @@ static ssize_t ext4_ext_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	 * case, we allocate an io_end structure to hook to the iocb.
 	 */
 	iocb->private = NULL;
+	ext4_inode_aio_set(inode, NULL);
+	if (!is_sync_kiocb(iocb)) {
+		io_end = ext4_init_io_end(inode, GFP_NOFS);
+		if (!io_end) {
+			ret = -ENOMEM;
+			goto retake_lock;
+		}
+		/*
+		 * Grab reference for DIO. Will be dropped in ext4_end_io_dio()
+		 */
+		iocb->private = ext4_get_io_end(io_end);
+		/*
+		 * we save the io structure for current async direct
+		 * IO, so that later ext4_map_blocks() could flag the
+		 * io structure whether there is a unwritten extents
+		 * needs to be converted when IO is completed.
+		 */
+		ext4_inode_aio_set(inode, io_end);
+	}
+
 	if (overwrite) {
 		get_block_func = ext4_get_block_write_nolock;
 	} else {
-		ext4_inode_aio_set(inode, NULL);
-		if (!is_sync_kiocb(iocb)) {
-			io_end = ext4_init_io_end(inode, GFP_NOFS);
-			if (!io_end) {
-				ret = -ENOMEM;
-				goto retake_lock;
-			}
-			/*
-			 * Grab reference for DIO. Will be dropped in
-			 * ext4_end_io_dio()
-			 */
-			iocb->private = ext4_get_io_end(io_end);
-			/*
-			 * we save the io structure for current async direct
-			 * IO, so that later ext4_map_blocks() could flag the
-			 * io structure whether there is a unwritten extents
-			 * needs to be converted when IO is completed.
-			 */
-			ext4_inode_aio_set(inode, io_end);
-		}
 		get_block_func = ext4_get_block_write;
 		dio_flags = DIO_LOCKING;
 	}
@@ -3866,28 +3866,28 @@ int ext4_punch_hole(struct inode *inode, loff_t offset, loff_t length)
 		EXT4_BLOCK_SIZE_BITS(sb);
 	stop_block = (offset + length) >> EXT4_BLOCK_SIZE_BITS(sb);
 
-	/* If there are no blocks to remove, return now */
-	if (first_block >= stop_block)
-		goto out_stop;
+	/* If there are blocks to remove, do it */
+	if (stop_block > first_block) {
 
-	down_write(&EXT4_I(inode)->i_data_sem);
-	ext4_discard_preallocations(inode);
+		down_write(&EXT4_I(inode)->i_data_sem);
+		ext4_discard_preallocations(inode);
 
-	ret = ext4_es_remove_extent(inode, first_block,
-				    stop_block - first_block);
-	if (ret) {
+		ret = ext4_es_remove_extent(inode, first_block,
+					    stop_block - first_block);
+		if (ret) {
+			up_write(&EXT4_I(inode)->i_data_sem);
+			goto out_stop;
+		}
+
+		if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
+			ret = ext4_ext_remove_space(inode, first_block,
+						    stop_block - 1);
+		else
+			ret = ext4_ind_remove_space(handle, inode, first_block,
+						    stop_block);
+
 		up_write(&EXT4_I(inode)->i_data_sem);
-		goto out_stop;
 	}
-
-	if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
-		ret = ext4_ext_remove_space(inode, first_block,
-					    stop_block - 1);
-	else
-		ret = ext4_ind_remove_space(handle, inode, first_block,
-					    stop_block);
-
-	up_write(&EXT4_I(inode)->i_data_sem);
 	if (IS_SYNC(inode))
 		ext4_handle_sync(handle);
 

@@ -3874,11 +3874,8 @@ const u8 *tcp_parse_md5sig_option(const struct tcphdr *th)
 	int length = (th->doff << 2) - sizeof(*th);
 	const u8 *ptr = (const u8 *)(th + 1);
 
-	/* If the TCP option is too short, we can short cut */
-	if (length < TCPOLEN_MD5SIG)
-		return NULL;
-
-	while (length > 0) {
+	/* If not enough data remaining, we can short cut */
+	while (length >= TCPOLEN_MD5SIG) {
 		int opcode = *ptr++;
 		int opsize;
 
@@ -5515,7 +5512,7 @@ static bool tcp_rcv_fastopen_synack(struct sock *sk, struct sk_buff *synack,
 	if (data) { /* Retransmit unacked data in SYN */
 		tcp_for_write_queue_from(data, sk) {
 			if (data == tcp_send_head(sk) ||
-			    __tcp_retransmit_skb(sk, data))
+			    __tcp_retransmit_skb(sk, data, 1))
 				break;
 		}
 		tcp_rearm_rto(sk);
